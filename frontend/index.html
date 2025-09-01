@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GIF QWERTY Hangman</title>
+  <!-- CSS lives in /assets per your mounts -->
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="wrap">
+
+    <!-- Top: Hangman stage -->
+    <div id="stagePanel" class="panel stage">
+      <img id="hangman" alt="Hangman stage" width="1133" height="1400" />
+      <div class="meta">
+        <span>Lives: <strong id="lives">—</strong></span>
+        <span>Wrong: <strong id="wrong">—</strong></span>
+        <span id="result"></span>
+      </div>
+    </div>
+
+    <!-- Middle: masked word textbox -->
+    <div class="panel word">
+      <input id="maskedBox" type="text" readonly aria-label="Revealed letters" />
+    </div>
+
+    <!-- Bottom: controls + keyboard -->
+    <div class="panel controls">
+      <div class="controls-row">
+        <label for="difficulty">Difficulty:</label>
+        <select id="difficulty" class="btn">
+          <option value="easy">easy</option>
+          <option value="normal" selected>normal</option>
+          <option value="hard">hard</option>
+        </select>
+        <button id="newgame" class="btn" type="button">New Game</button>
+      </div>
+
+      <div class="keyboard" id="keyboard" role="application" aria-label="GIF keyboard">
+        <div class="row" data-keys="QWERTYUIOP"></div>
+        <div class="row" data-keys="ASDFGHJKL"></div>
+        <div class="row" data-keys="ZXCVBNM"></div>
+      </div>
+
+      <!-- Full-word guess box (small & tight) -->
+      <div class="guess-box">
+        <input id="guessInput" type="text" placeholder="Type full word…" />
+        <button id="guessBtn" class="btn">Guess</button>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // ----------------- Asset config -----------------
+    const LETTER_ASSETS_PATH = './assets/gifs';
+    const LETTER_EXT = 'gif';
+
+    const HANGMAN_PATH = './assets/hangman';
+    // Your stage names (base -> dead)
+    const STAGES = [
+      'base.gif',
+      'post.gif', 'head.gif', 'body.gif', 'LArm.gif',
+      'RArm.gif', 'LLeg.gif', 'RLeg.gif', 'dead.gif'
+    ];
+
+    // Preload hangman stages
+    STAGES.forEach(n => { const i = new Image(); i.src = `${HANGMAN_PATH}/${n}`; });
+    const winImage = new Image();
+    winImage.src = `${HANGMAN_PATH}/win.gif`;
+
+    // ----------------- API helpers ------------------
+    async function apiNew(difficulty) {
+      const r = await fetch('/api/new', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ difficulty })
+      });
+      if (!r.ok) throw new Error('Failed to start game');
+      return r.json();
+    }
+    async function apiGuess(game_id, letterOrWord) {
+      const r = await fetch('/api/guess', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ game_id, letter: letterOrWord })
+      });
+      if (!r.ok) throw new Error('Guess failed');
+      return r.json();
+    }
+
+    // ----------------- DOM refs ------------------
+    const diffEl     = document.getElementById('difficulty');
+    const newGameEl  = document.getElementById('newgame');
+    const keyboardEl = document.getElementById('keyboard');
+    const maskedBox  = document.getElementById('maskedBox');
+    const hangmanEl  = document.getElementById('hangman');
+    const livesEl    = document.getElementById('lives');
+    const wrongEl    = document.getElementById('wrong');
+    const resultEl   = document.getElementById('result');
+    const guessInput = document.getElementById('guessInput');
+    const guessBtn   = document.getElementById('guessBtn');
+
+    // ----------------- Build GIF keys ------------------
+    const keyMap = new Map();
+    keyboardEl.querySelectorAll('.row').forEach(row => {
+      const letters = row.getAttribute('data-keys');
+      for (const letter of letters) {
+        const btn = document.createElement('button');
+        btn.className = 'key';
+        btn.type = 'button';
+        btn.title = letter;
+
+        const img = document.createElement('img');
+        img.alt = letter;
+        img.decoding = 'async';
+        img.loading = 'lazy';
+        img.draggable = false;
+        img.src = `${LETTER_ASSETS_PATH}/${letter.toLowerCase()}.${LETTER_EXT}`;
+        btn.appendChild(img);
+
+        btn.addEventListener('click', () => onLetter(letter));
+        row.appendChild(btn);
+        keyMap.set(letter.toUpperCase(), btn);
+      }
+    });
+
+    // ----------------- Game state ------------------
+    let gameId = null;
+    let gameOver = false;
+    let startLives = null;
+    const guessed = new Set();
+
+    function stageIndexFromLives(lives) {
+      if (startLives == null || startLives <= 0) return 0;
+      const progress = startLives - Math.max(lives, 0);
+      const idx = Math.round((progress / startLives) * (STAGES.length - 1));
+      return Math.min(Math.max(idx, 0), STAGES.length - 1);
+    }
+    function updateHangman(lives) {
+      const idx = stageIndexFromLives(lives);
+      hangmanEl.src = `${HANGMAN_PATH}/${STAGES[idx]}`;
+    }
+
+    function setGuessInputsEnabled(enabled) {
+      guessInput.disabled = !enabled;
+      guessBtn.disabled   = !enabled;
+      guessInput.style.opacity = enabled ? 1 : 0.6;
+      guessBtn.style.opacity   = enabled ? 1 : 0.6;
+    }
+
+    function updateHUD(state) {
+      maskedBox.value = state.masked;
+      livesEl.textContent = state.lives;
+      wrongEl.textContent = (state.wrong || []).join(' ');
+      resultEl.textContent = state.won ? '✅ You won!' : state.lost ? '❌ You lost.' : '';
+      gameOver = state.won || state.lost;
+
+      if (state.won) {
+        // show win.gif
+        hangmanEl.src = `${HANGMAN_PATH}/win.gif`;
+      } else {
+        // otherwise use normal stages
+        updateHangman(state.lives);
+      }
+
+      for (const [k, btn] of keyMap.entries()) {
+        const used = guessed.has(k);
+        btn.disabled = gameOver || used;
+        btn.style.opacity = (gameOver || used) ? 0.55 : 1;
+      }
+    }
+
+
+    async function startGame(difficulty) {
+      guessed.clear();
+      for (const btn of keyMap.values()) { btn.disabled = false; btn.style.opacity = 1; }
+      resultEl.textContent = 'Starting...';
+
+      const state = await apiNew(difficulty);
+      gameId = state.game_id;
+      startLives = state.lives;
+
+      updateHangman(startLives);
+      updateHUD(state);
+      resultEl.textContent = '';
+      guessInput.value = '';
+      guessInput.placeholder = 'Type full word…';
+      guessInput.setAttribute('maxlength', 32);
+      guessInput.blur(); // avoid mobile keyboards
+    }
+
+    async function onLetter(letter) {
+      if (!gameId || gameOver) return;
+      const upper = letter.toUpperCase();
+      if (guessed.has(upper)) return;
+      guessed.add(upper);
+
+      const btn = keyMap.get(upper);
+      if (btn) { btn.disabled = true; btn.style.opacity = 0.55; }
+
+      try {
+        const state = await apiGuess(gameId, letter.toLowerCase());
+        updateHUD(state);
+      } catch (err) {
+        guessed.delete(upper);
+        if (btn) { btn.disabled = false; btn.style.opacity = 1; }
+        console.error(err);
+      }
+    }
+
+    // ---- Full-word guessing (button + Enter key) ----
+    guessBtn.addEventListener('click', async () => {
+      if (!gameId || gameOver) return;
+      const word = guessInput.value.trim().toLowerCase();
+      if (!word) return;
+      try {
+        const state = await apiGuess(gameId, word);
+        updateHUD(state);
+        guessInput.value = '';
+      } catch (err) {
+        console.error(err);
+      }
+    });
+    guessInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        guessBtn.click();
+      }
+    });
+
+    // ----------------- Wire controls ------------------
+    newGameEl.addEventListener('click', () => startGame(diffEl.value));
+    window.addEventListener('DOMContentLoaded', () => startGame(diffEl.value));
+  </script>
+</body>
+</html>
